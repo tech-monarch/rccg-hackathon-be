@@ -169,34 +169,53 @@ async function main() {
     },
   ];
 
-  for (const p of providers) {
-    await prisma.user.upsert({
-      where: { email: p.email },
-      update: {},
-      create: {
-        email: p.email,
-        passwordHash,
-        role: 'PROVIDER',
-        isVerified: true,
-        provider: {
-          create: {
-            businessName: p.businessName,
-            ownerName: p.ownerName,
-            phone: p.phone,
-            category: p.category,
-            location: p.location,
-            description: p.description,
-            services: p.services,
-            experience: p.experience,
-            isVerified: true,
-            isPublished: true,
-            avgRating: p.avgRating,
-            totalReviews: p.totalReviews,
-          },
+for (const p of providers) {
+  const userRecord = await prisma.user.upsert({
+    where: { email: p.email },
+    update: {},
+    create: {
+      email: p.email,
+      passwordHash,
+      role: 'PROVIDER',
+      isVerified: true,
+      provider: {
+        create: {
+          businessName: p.businessName,
+          ownerName: p.ownerName,
+          phone: p.phone,
+          category: p.category,
+          location: p.location,
+          description: p.description,
+          services: p.services,
+          experience: p.experience,
+          isVerified: true,
+          isPublished: true,
+          avgRating: p.avgRating,
+          totalReviews: p.totalReviews,
         },
       },
+    },
+    include: { provider: true },   // ← need the provider.id
+  });
+
+  // Add portfolio images if provider was just created
+  if (userRecord.provider && p.images?.length) {
+    // Only insert if none exist yet (safe to re-run seed)
+    const existing = await prisma.portfolioImage.count({
+      where: { providerId: userRecord.provider.id },
     });
+    if (existing === 0) {
+      await prisma.portfolioImage.createMany({
+        data: p.images.map((imageUrl, i) => ({
+          providerId: userRecord.provider!.id,
+          imageUrl,
+          publicId: `seed/${userRecord.provider!.id}/${i}`,  // placeholder publicId
+          sortOrder: i,
+        })),
+      });
+    }
   }
+}
 
   // Sample housing listings
   const housingListings = [
