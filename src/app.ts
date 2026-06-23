@@ -25,7 +25,7 @@ app.use(helmet());
 app.use(
   cors({
     origin: (origin, callback) => {
-      const allowed = [config.frontendUrl, 'http://localhost:3000', 'http://localhost:3001'];
+      const allowed = [config.frontendUrl, 'http://localhost:3000', 'http://localhost:3001', 'https://rccg-fe-api-keys-consumed.vercel.app', 'https://haven-rccg.vercel.app'];
       if (!origin || allowed.includes(origin)) {
         callback(null, true);
       } else {
