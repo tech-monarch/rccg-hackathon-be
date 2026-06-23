@@ -73,6 +73,11 @@ async function main() {
       experience: '5+ years',
       avgRating: 4.8,
       totalReviews: 127,
+
+      images: [
+        'https://images.unsplash.com/photo-1581578731548-c64695cc6952?w=800',
+        'https://images.unsplash.com/photo-1527515637462-cff94eecc1ac?w=800',
+      ],
     },
     {
       email: 'techfix@example.com',
@@ -86,6 +91,11 @@ async function main() {
       experience: '7+ years',
       avgRating: 4.9,
       totalReviews: 89,
+
+      images: [
+        'https://images.unsplash.com/photo-1498050108023-c5249f4df085?w=800',
+        'https://images.unsplash.com/photo-1461749280684-dccba630e2f6?w=800',
+      ],
     },
     {
       email: 'laundryking@example.com',
@@ -99,6 +109,11 @@ async function main() {
       experience: '3+ years',
       avgRating: 4.6,
       totalReviews: 203,
+
+      images: [
+        'https://images.unsplash.com/photo-1545173168-9f1947eebb7f?w=800',
+        'https://images.unsplash.com/photo-1604335399105-a0c585fd81a1?w=800',
+      ],
     },
     {
       email: 'acadhelp@example.com',
@@ -112,6 +127,10 @@ async function main() {
       experience: '10+ years',
       avgRating: 4.7,
       totalReviews: 156,
+      images: [
+        'https://images.unsplash.com/photo-1427504494785-3a9ca7044f45?w=800',
+        'https://images.unsplash.com/photo-1509062522246-3755977927d7?w=800',
+      ],
     },
     {
       email: 'hairqueen@example.com',
@@ -125,6 +144,11 @@ async function main() {
       experience: '8+ years',
       avgRating: 4.5,
       totalReviews: 178,
+
+      images: [
+        'https://images.unsplash.com/photo-1522337360788-8b13dee7a37e?w=800',
+        'https://images.unsplash.com/photo-1560869713-7d0a29430803?w=800',
+      ],
     },
     {
       email: 'homechef@example.com',
@@ -138,6 +162,10 @@ async function main() {
       experience: '12+ years',
       avgRating: 4.9,
       totalReviews: 241,
+      images: [
+        'https://images.unsplash.com/photo-1565299715199-866c917206bb?w=800',
+        'https://images.unsplash.com/photo-1547592166-23ac45744acd?w=800',
+      ],
     },
   ];
 
