@@ -96,7 +96,7 @@ export const deletePortfolioImage = async (
   try {
     await providersService.deletePortfolioImage(
       req.user!.profileId!,
-      req.params.imageId,
+      req.params.imageId as string,
     );
     sendSuccess(res, { message: "Image deleted successfully" });
   } catch (err) {
@@ -126,7 +126,7 @@ export const replyToInquiry = async (
   try {
     const inquiry = await providersService.replyToInquiry(
       req.user!.profileId!,
-      req.params.inquiryId,
+      req.params.inquiryId as string,
       req.body,
     );
     sendSuccess(res, { inquiry });
@@ -159,7 +159,7 @@ export const replyToReview = async (
   try {
     const review = await providersService.replyToReview(
       req.user!.profileId!,
-      req.params.reviewId,
+      req.params.reviewId as string,
       req.body.reply,
     );
     sendSuccess(res, { review });
