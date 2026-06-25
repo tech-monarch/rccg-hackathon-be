@@ -86,24 +86,28 @@ export const authenticate = async (
         return;
       }
 
-      cached = {
+      const userData: Omit<CachedUser, 'expiresAt'> = {
         role: user.role,
         isActive: user.isActive,
         customerId: user.customer?.id,
         providerId: user.provider?.id,
       };
-      setCachedUser(payload.userId, cached);
+      setCachedUser(payload.userId, userData);
+      cached = { ...userData, expiresAt: Date.now() + USER_CACHE_TTL_MS };
     }
 
-    if (!cached.isActive) {
+    // cached is always non-null here: either it was a cache hit, or we just built it above
+    const resolvedUser = cached!;
+
+    if (!resolvedUser.isActive) {
       sendError(res, 'Account suspended', 401);
       return;
     }
 
     req.user = {
       userId: payload.userId,
-      role: cached.role,
-      profileId: cached.customerId ?? cached.providerId,
+      role: resolvedUser.role,
+      profileId: resolvedUser.customerId ?? resolvedUser.providerId,
     };
 
     next();
