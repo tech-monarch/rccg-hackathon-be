@@ -36,6 +36,7 @@ app.use(
         'http://localhost:3000',
         'http://localhost:3001',
         'https://haven-rccg.vercel.app',
+        'https://rccg-hackathon.vercel.app',
       ];
       if (!origin || allowed.includes(origin)) {
         callback(null, true);
