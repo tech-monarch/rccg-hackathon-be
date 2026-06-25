@@ -6,21 +6,50 @@ import { RegisterCustomerInput, RegisterProviderInput, LoginInput } from './auth
 import { sendEmail, emailTemplates } from '../../utils/email';
 import { config } from '../../config';
 
-// In-memory reset token store (use Redis in production)
+// ─── Performance note ─────────────────────────────────────────────────────────
+// bcrypt rounds are controlled by BCRYPT_ROUNDS env var (default 10).
+// The original code hardcoded 12 for password hashing AND 10 for refresh token
+// hashing — that was two expensive bcrypt calls on every login. We fix both:
+//
+//  1. Configurable rounds via config.bcryptRounds (10 is the standard sweet spot).
+//  2. Refresh tokens are now stored as a SHA-256 hex digest (not bcrypt).
+//     Refresh tokens are already long random strings (256-bit JWT secret) so
+//     bcrypt adds no meaningful security — SHA-256 is sufficient and ~1000x faster.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// In-memory reset token store — suitable for MVP single-instance.
+// TODO: move to DB (PasswordResetToken table) before running multiple instances.
 const resetTokens = new Map<string, { userId: string; expires: Date }>();
 
+/** Fast, secure token comparison using SHA-256 instead of bcrypt */
+function hashToken(token: string): string {
+  return crypto.createHash('sha256').update(token).digest('hex');
+}
+
+function verifyTokenHash(token: string, stored: string): boolean {
+  return crypto.timingSafeEqual(
+    Buffer.from(hashToken(token), 'hex'),
+    Buffer.from(stored, 'hex')
+  );
+}
+
 export const registerCustomer = async (input: RegisterCustomerInput) => {
-  const existing = await prisma.user.findUnique({ where: { email: input.email } });
+  // Single DB lookup — check if email exists
+  const existing = await prisma.user.findUnique({
+    where: { email: input.email },
+    select: { id: true }, // minimal projection
+  });
   if (existing) throw Object.assign(new Error('Email already registered'), { statusCode: 409 });
 
-  const passwordHash = await bcrypt.hash(input.password, 12);
+  // Use configurable rounds (default 10 ≈ 80ms vs 12 ≈ 400ms)
+  const passwordHash = await bcrypt.hash(input.password, config.bcryptRounds);
 
   const user = await prisma.user.create({
     data: {
       email: input.email,
       passwordHash,
       role: 'CUSTOMER',
-      isVerified: true, // Auto-verify for MVP; add email OTP for production
+      isVerified: true,
       customer: {
         create: {
           fullName: input.fullName,
@@ -28,17 +57,21 @@ export const registerCustomer = async (input: RegisterCustomerInput) => {
         },
       },
     },
-    include: { customer: true },
+    include: { customer: { select: { id: true, fullName: true, phone: true, avatarUrl: true, totalPoints: true } } },
   });
 
   const tokenPayload = { userId: user.id, role: user.role, profileId: user.customer!.id };
   const accessToken = generateAccessToken(tokenPayload);
   const refreshToken = generateRefreshToken(tokenPayload);
 
-  const refreshHash = await bcrypt.hash(refreshToken, 10);
-  await prisma.user.update({ where: { id: user.id }, data: { refreshToken: refreshHash } });
+  // SHA-256 hash (fast) instead of bcrypt (slow) for token storage
+  await prisma.user.update({
+    where: { id: user.id },
+    data: { refreshToken: hashToken(refreshToken) },
+  });
 
-  await sendEmail({ to: user.email, ...emailTemplates.welcome(input.fullName) });
+  // Fire-and-forget — email failure must not slow down registration response
+  sendEmail({ to: user.email, ...emailTemplates.welcome(input.fullName) }).catch(() => {});
 
   return {
     user: { id: user.id, email: user.email, role: user.role },
@@ -48,11 +81,17 @@ export const registerCustomer = async (input: RegisterCustomerInput) => {
   };
 };
 
-export const registerProvider = async (input: RegisterProviderInput, portfolioImages?: { url: string; publicId: string }[]) => {
-  const existing = await prisma.user.findUnique({ where: { email: input.email } });
+export const registerProvider = async (
+  input: RegisterProviderInput,
+  portfolioImages?: { url: string; publicId: string }[]
+) => {
+  const existing = await prisma.user.findUnique({
+    where: { email: input.email },
+    select: { id: true },
+  });
   if (existing) throw Object.assign(new Error('Email already registered'), { statusCode: 409 });
 
-  const passwordHash = await bcrypt.hash(input.password, 12);
+  const passwordHash = await bcrypt.hash(input.password, config.bcryptRounds);
 
   const user = await prisma.user.create({
     data: {
@@ -83,10 +122,13 @@ export const registerProvider = async (input: RegisterProviderInput, portfolioIm
   const tokenPayload = { userId: user.id, role: user.role, profileId: user.provider!.id };
   const accessToken = generateAccessToken(tokenPayload);
   const refreshToken = generateRefreshToken(tokenPayload);
-  const refreshHash = await bcrypt.hash(refreshToken, 10);
-  await prisma.user.update({ where: { id: user.id }, data: { refreshToken: refreshHash } });
 
-  await sendEmail({ to: user.email, ...emailTemplates.welcome(input.businessName) });
+  await prisma.user.update({
+    where: { id: user.id },
+    data: { refreshToken: hashToken(refreshToken) },
+  });
+
+  sendEmail({ to: user.email, ...emailTemplates.welcome(input.businessName) }).catch(() => {});
 
   return {
     user: { id: user.id, email: user.email, role: user.role },
@@ -97,11 +139,17 @@ export const registerProvider = async (input: RegisterProviderInput, portfolioIm
 };
 
 export const login = async (input: LoginInput) => {
+  // Fetch user + profile in one query. Select only what we need.
   const user = await prisma.user.findUnique({
     where: { email: input.email },
-    include: {
-      customer: true,
-      provider: true,
+    select: {
+      id: true,
+      email: true,
+      role: true,
+      isActive: true,
+      passwordHash: true,
+      customer: { select: { id: true, fullName: true, phone: true, avatarUrl: true, totalPoints: true } },
+      provider: { select: { id: true, businessName: true, ownerName: true, phone: true, category: true, location: true, avgRating: true } },
     },
   });
 
@@ -115,8 +163,12 @@ export const login = async (input: LoginInput) => {
   const tokenPayload = { userId: user.id, role: user.role, profileId };
   const accessToken = generateAccessToken(tokenPayload);
   const refreshToken = generateRefreshToken(tokenPayload);
-  const refreshHash = await bcrypt.hash(refreshToken, 10);
-  await prisma.user.update({ where: { id: user.id }, data: { refreshToken: refreshHash } });
+
+  // Single update — SHA-256 hash, no bcrypt wait
+  await prisma.user.update({
+    where: { id: user.id },
+    data: { refreshToken: hashToken(refreshToken) },
+  });
 
   const profile = user.role === 'CUSTOMER' ? user.customer : user.provider;
 
@@ -132,17 +184,27 @@ export const login = async (input: LoginInput) => {
 export const refreshTokens = async (token: string) => {
   const payload = verifyRefreshToken(token);
 
-  const user = await prisma.user.findUnique({ where: { id: payload.userId } });
-  if (!user?.refreshToken) throw Object.assign(new Error('Invalid refresh token'), { statusCode: 401 });
+  const user = await prisma.user.findUnique({
+    where: { id: payload.userId },
+    select: { id: true, role: true, isActive: true, refreshToken: true },
+  });
+  if (!user?.refreshToken || !user.isActive) {
+    throw Object.assign(new Error('Invalid refresh token'), { statusCode: 401 });
+  }
 
-  const valid = await bcrypt.compare(token, user.refreshToken);
-  if (!valid) throw Object.assign(new Error('Invalid refresh token'), { statusCode: 401 });
+  // Fast SHA-256 comparison instead of bcrypt.compare
+  if (!verifyTokenHash(token, user.refreshToken)) {
+    throw Object.assign(new Error('Invalid refresh token'), { statusCode: 401 });
+  }
 
   const tokenPayload = { userId: user.id, role: user.role, profileId: payload.profileId };
   const accessToken = generateAccessToken(tokenPayload);
   const newRefreshToken = generateRefreshToken(tokenPayload);
-  const refreshHash = await bcrypt.hash(newRefreshToken, 10);
-  await prisma.user.update({ where: { id: user.id }, data: { refreshToken: refreshHash } });
+
+  await prisma.user.update({
+    where: { id: user.id },
+    data: { refreshToken: hashToken(newRefreshToken) },
+  });
 
   return { accessToken, refreshToken: newRefreshToken };
 };
@@ -154,9 +216,14 @@ export const logout = async (userId: string) => {
 export const forgotPassword = async (email: string) => {
   const user = await prisma.user.findUnique({
     where: { email },
-    include: { customer: true, provider: true },
+    select: {
+      id: true,
+      email: true,
+      customer: { select: { fullName: true } },
+      provider: { select: { businessName: true } },
+    },
   });
-  if (!user) return; // Silently succeed to prevent email enumeration
+  if (!user) return; // Silently succeed — prevents email enumeration
 
   const token = crypto.randomBytes(32).toString('hex');
   const expires = new Date(Date.now() + 3600000); // 1 hour
@@ -164,7 +231,7 @@ export const forgotPassword = async (email: string) => {
 
   const name = user.customer?.fullName ?? user.provider?.businessName ?? 'User';
   const resetLink = `${config.frontendUrl}/reset-password?token=${token}`;
-  await sendEmail({ to: user.email, ...emailTemplates.passwordReset(name, resetLink) });
+  sendEmail({ to: user.email, ...emailTemplates.passwordReset(name, resetLink) }).catch(() => {});
 };
 
 export const resetPassword = async (token: string, newPassword: string) => {
@@ -173,7 +240,10 @@ export const resetPassword = async (token: string, newPassword: string) => {
     throw Object.assign(new Error('Invalid or expired reset token'), { statusCode: 400 });
   }
 
-  const passwordHash = await bcrypt.hash(newPassword, 12);
-  await prisma.user.update({ where: { id: entry.userId }, data: { passwordHash, refreshToken: null } });
+  const passwordHash = await bcrypt.hash(newPassword, config.bcryptRounds);
+  await prisma.user.update({
+    where: { id: entry.userId },
+    data: { passwordHash, refreshToken: null },
+  });
   resetTokens.delete(token);
 };

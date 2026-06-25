@@ -5,7 +5,7 @@ import express from 'express';
 
 const router = Router();
 
-// Paystack webhook – raw body needed for signature verification
+// Paystack webhook — raw body
 router.post(
   '/paystack/callback',
   express.raw({ type: 'application/json' }),
@@ -13,6 +13,7 @@ router.post(
 );
 
 router.post('/', authenticate, requireRole('CUSTOMER'), bookingsController.createBooking);
+router.get('/', authenticate, requireRole('PROVIDER'), bookingsController.getProviderBookings);
 router.get('/:id', authenticate, bookingsController.getBookingById);
 router.post('/:id/complete', authenticate, requireRole('PROVIDER'), bookingsController.completeBooking);
 

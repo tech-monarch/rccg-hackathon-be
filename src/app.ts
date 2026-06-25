@@ -5,6 +5,7 @@ import morgan from 'morgan';
 import { config } from './config';
 import { errorHandler, notFoundHandler } from './middleware/error.middleware';
 import { generalLimiter } from './middleware/rateLimiter.middleware';
+import { internalAuth } from './middleware/internalAuth.middleware';
 
 // Route imports
 import authRoutes from './modules/auth/auth.routes';
@@ -17,6 +18,7 @@ import inquiriesRoutes from './modules/inquiries/inquiries.routes';
 import housingRoutes from './modules/housing/housing.routes';
 import pointsRoutes from './modules/points/points.routes';
 import adminRoutes from './modules/admin/admin.routes';
+import internalRoutes from './modules/internal/internal.routes';
 
 const app = express();
 
@@ -25,7 +27,16 @@ app.use(helmet());
 app.use(
   cors({
     origin: (origin, callback) => {
-      const allowed = [config.frontendUrl, 'http://localhost:3000', 'http://localhost:3001', 'https://rccg-fe-api-keys-consumed.vercel.app', 'https://haven-rccg.vercel.app'];
+      // Allowed origins from env + sensible defaults
+      const allowedRaw = config.frontendUrl
+        ? config.frontendUrl.split(',').map(s => s.trim())
+        : [];
+      const allowed = [
+        ...allowedRaw,
+        'http://localhost:3000',
+        'http://localhost:3001',
+        'https://haven-rccg.vercel.app',
+      ];
       if (!origin || allowed.includes(origin)) {
         callback(null, true);
       } else {
@@ -34,12 +45,11 @@ app.use(
     },
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Internal-Key'],
   })
 );
 
 // ─── Body parsing ─────────────────────────────────────────────────────────────
-// Note: Paystack webhook needs raw body — handled inside bookings routes
 app.use((req, res, next) => {
   if (req.originalUrl === '/api/v1/bookings/paystack/callback') {
     next();
@@ -77,8 +87,11 @@ app.use(`${API}/housing`, housingRoutes);
 app.use(`${API}/points`, pointsRoutes);
 app.use(`${API}/admin`, adminRoutes);
 
-// Reviews are nested under bookings path
+// Reviews nested under bookings path
 app.use(`${API}`, reviewsRoutes);
+
+// ─── Internal API (bot-only) ─────────────────────────────────────────────────
+app.use(`${API}/internal`, internalAuth, internalRoutes);
 
 // ─── 404 + Error handlers ─────────────────────────────────────────────────────
 app.use(notFoundHandler);

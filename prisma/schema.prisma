@@ -73,6 +73,9 @@ model User {
 
   customer Customer?
   provider Provider?
+
+  @@index([email])
+  @@index([role, isActive])
 }
 
 model Customer {
@@ -92,6 +95,9 @@ model Customer {
   inquiries          Inquiry[]
   serviceRequests    ServiceRequest[]
   pointsTransactions PointsTransaction[]
+
+  @@index([phone])
+  @@index([userId])
 }
 
 model Provider {
@@ -119,6 +125,11 @@ model Provider {
   bookings        Booking[]
   reviews         Review[]
   inquiries       Inquiry[]
+
+  @@index([phone])
+  @@index([category, isPublished])
+  @@index([location])
+  @@index([avgRating])
 }
 
 model PortfolioImage {
@@ -129,6 +140,8 @@ model PortfolioImage {
   publicId   String
   sortOrder  Int      @default(0)
   createdAt  DateTime @default(now())
+
+  @@index([providerId])
 }
 
 model HousingListing {
@@ -147,6 +160,9 @@ model HousingListing {
   isAvailable    Boolean         @default(true)
   createdAt      DateTime        @default(now())
   updatedAt      DateTime        @updatedAt
+
+  @@index([isAvailable, category])
+  @@index([location])
 }
 
 model ServiceRequest {
@@ -165,16 +181,21 @@ model ServiceRequest {
 
   media    ServiceRequestMedia[]
   bookings Booking[]
+
+  @@index([customerId, status])
+  @@index([status])
 }
 
 model ServiceRequestMedia {
-  id             String         @id @default(uuid())
+  id               String         @id @default(uuid())
   serviceRequestId String
-  serviceRequest ServiceRequest @relation(fields: [serviceRequestId], references: [id], onDelete: Cascade)
-  mediaUrl       String
-  publicId       String
-  mediaType      String
-  createdAt      DateTime       @default(now())
+  serviceRequest   ServiceRequest @relation(fields: [serviceRequestId], references: [id], onDelete: Cascade)
+  mediaUrl         String
+  publicId         String
+  mediaType        String
+  createdAt        DateTime       @default(now())
+
+  @@index([serviceRequestId])
 }
 
 model Booking {
@@ -195,6 +216,11 @@ model Booking {
 
   payment Payment?
   review  Review?
+
+  @@index([customerId, status])
+  @@index([providerId, status])
+  @@index([serviceRequestId])
+  @@index([status])
 }
 
 model Payment {
@@ -209,6 +235,9 @@ model Payment {
   paidAt           DateTime?
   createdAt        DateTime      @default(now())
   updatedAt        DateTime      @updatedAt
+
+  @@index([customerId])
+  @@index([gatewayReference])
 }
 
 model Review {
@@ -224,6 +253,9 @@ model Review {
   providerReply String?
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
+
+  @@index([providerId])
+  @@index([customerId])
 }
 
 model Inquiry {
@@ -238,6 +270,9 @@ model Inquiry {
   status     InquiryStatus @default(NEW)
   createdAt  DateTime      @default(now())
   updatedAt  DateTime      @updatedAt
+
+  @@index([providerId, status])
+  @@index([customerId])
 }
 
 model PointsTransaction {
@@ -249,4 +284,20 @@ model PointsTransaction {
   bookingId   String?
   description String
   createdAt   DateTime              @default(now())
+
+  @@index([customerId])
+}
+
+// ─── Bot session store ────────────────────────────────────────────────────────
+// Replaces the WhatsApp bot's in-memory Map so sessions survive restarts.
+model BotSession {
+  phoneNumber  String   @id
+  messages     Json     @default("[]")
+  preferences  Json     @default("{}")
+  resolvedRole String?  // CUSTOMER | PROVIDER | ADMIN | null (unknown)
+  profileId    String?  // Cached Customer.id or Provider.id
+  userId       String?  // Cached User.id
+  updatedAt    DateTime @updatedAt
+
+  @@index([phoneNumber])
 }

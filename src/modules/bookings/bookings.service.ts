@@ -2,8 +2,10 @@ import prisma from '../../config/database';
 import { config } from '../../config';
 import { calculatePoints } from '../../utils/helpers';
 import { sendEmail, emailTemplates } from '../../utils/email';
+import { sendWhatsAppMessage, waTemplates } from '../../utils/whatsapp';
 
 const PAYSTACK_BASE = 'https://api.paystack.co';
+import crypto from 'crypto';
 
 const paystackHeaders = () => ({
   Authorization: `Bearer ${config.paystack.secretKey}`,
@@ -16,45 +18,34 @@ export const createBooking = async (
 ) => {
   const { serviceRequestId, providerId, scheduledAt, amount = 5000 } = data;
 
-  // Validate service request belongs to customer
   const serviceRequest = await prisma.serviceRequest.findUnique({ where: { id: serviceRequestId } });
   if (!serviceRequest) throw Object.assign(new Error('Service request not found'), { statusCode: 404 });
   if (serviceRequest.customerId !== customerId) throw Object.assign(new Error('Not authorized'), { statusCode: 403 });
 
-  // Validate provider exists
-  const provider = await prisma.provider.findUnique({
-    where: { id: providerId },
-    include: { user: { select: { email: true } } },
-  });
-  if (!provider) throw Object.assign(new Error('Provider not found'), { statusCode: 404 });
+  const [provider, customer, existing] = await Promise.all([
+    prisma.provider.findUnique({
+      where: { id: providerId },
+      include: { user: { select: { email: true } } },
+    }),
+    prisma.customer.findUnique({
+      where: { id: customerId },
+      include: { user: { select: { email: true } } },
+    }),
+    prisma.booking.findFirst({
+      where: { serviceRequestId, status: { notIn: ['CANCELLED'] } },
+    }),
+  ]);
 
-  // Check not already booked
-  const existing = await prisma.booking.findFirst({
-    where: { serviceRequestId, status: { notIn: ['CANCELLED'] } },
-  });
+  if (!provider) throw Object.assign(new Error('Provider not found'), { statusCode: 404 });
   if (existing) throw Object.assign(new Error('This request is already booked'), { statusCode: 409 });
 
-  const customer = await prisma.customer.findUnique({
-    where: { id: customerId },
-    include: { user: { select: { email: true } } },
-  });
-
-  // Create booking
   const booking = await prisma.booking.create({
-    data: {
-      serviceRequestId,
-      customerId,
-      providerId,
-      amount,
-      scheduledAt: new Date(scheduledAt),
-      status: 'PENDING_PAYMENT',
-    },
+    data: { serviceRequestId, customerId, providerId, amount, scheduledAt: new Date(scheduledAt), status: 'PENDING_PAYMENT' },
   });
 
-  // Update service request status
   await prisma.serviceRequest.update({ where: { id: serviceRequestId }, data: { status: 'BOOKED' } });
 
-  // Initialize Paystack payment
+  // Paystack init
   let paystackData: any = null;
   if (config.paystack.secretKey && config.paystack.secretKey !== 'sk_test_xxxxxxxxxxxxxxxxxxxxxxxxxxxx') {
     try {
@@ -63,7 +54,7 @@ export const createBooking = async (
         headers: paystackHeaders(),
         body: JSON.stringify({
           email: customer!.user.email,
-          amount: amount * 100, // Paystack uses kobo
+          amount: amount * 100,
           reference: `HAVEN-${booking.id}`,
           metadata: { bookingId: booking.id, customerId, providerId },
           callback_url: `${config.frontendUrl}/booking/confirm?bookingId=${booking.id}`,
@@ -76,10 +67,38 @@ export const createBooking = async (
     }
   }
 
-  return { booking, paystackAuthorizationUrl: paystackData?.authorization_url ?? null, paystackReference: paystackData?.reference ?? null };
+  // Notify provider via WhatsApp (fire-and-forget)
+  if (provider.phone && customer) {
+    sendWhatsAppMessage(
+      provider.phone,
+      waTemplates.bookingCreated(
+        provider.businessName,
+        customer.fullName,
+        serviceRequest.category,
+        new Date(scheduledAt)
+      )
+    );
+  }
+
+  return {
+    booking,
+    paystackAuthorizationUrl: paystackData?.authorization_url ?? null,
+    paystackReference: paystackData?.reference ?? null,
+  };
 };
 
-export const handlePaystackWebhook = async (event: any) => {
+export const handlePaystackWebhook = async (rawBody: Buffer, signature: string, event: any) => {
+  // Verify Paystack webhook signature (HMAC SHA-512)
+  if (config.paystack.webhookSecret) {
+    const hash = crypto
+      .createHmac('sha512', config.paystack.webhookSecret)
+      .update(rawBody)
+      .digest('hex');
+    if (hash !== signature) {
+      throw Object.assign(new Error('Invalid webhook signature'), { statusCode: 401 });
+    }
+  }
+
   if (event.event !== 'charge.success') return;
 
   const reference = event.data.reference as string;
@@ -110,21 +129,31 @@ export const handlePaystackWebhook = async (event: any) => {
     prisma.serviceRequest.update({ where: { id: booking.serviceRequestId }, data: { status: 'BOOKED' } }),
   ]);
 
-  // Send confirmation email
-  await sendEmail({
+  // Email confirmation
+  sendEmail({
     to: booking.customer.user.email,
-    ...emailTemplates.bookingConfirmed(
+    ...emailTemplates.bookingConfirmed(booking.customer.fullName, booking.provider.businessName, booking.scheduledAt),
+  }).catch(() => {});
+
+  // WhatsApp notification to customer and provider
+  sendWhatsAppMessage(
+    booking.customer.phone,
+    waTemplates.paymentConfirmed(
       booking.customer.fullName,
       booking.provider.businessName,
+      Number(booking.amount),
       booking.scheduledAt
-    ),
-  });
+    )
+  );
 };
 
 export const completeBooking = async (providerId: string, bookingId: string) => {
   const booking = await prisma.booking.findUnique({
     where: { id: bookingId },
-    include: { customer: true },
+    include: {
+      customer: true,
+      provider: { select: { businessName: true } },
+    },
   });
   if (!booking) throw Object.assign(new Error('Booking not found'), { statusCode: 404 });
   if (booking.providerId !== providerId) throw Object.assign(new Error('Not authorized'), { statusCode: 403 });
@@ -153,6 +182,12 @@ export const completeBooking = async (providerId: string, bookingId: string) => 
     prisma.serviceRequest.update({ where: { id: booking.serviceRequestId }, data: { status: 'COMPLETED' } }),
   ]);
 
+  // WhatsApp notification to customer
+  sendWhatsAppMessage(
+    booking.customer.phone,
+    waTemplates.jobCompleted(booking.customer.fullName, booking.provider.businessName, pointsToAward)
+  );
+
   return { booking: updatedBooking, pointsAwarded: pointsToAward };
 };
 
@@ -164,6 +199,21 @@ export const getBookingById = async (id: string) => {
       serviceRequest: true,
       payment: true,
       review: true,
+    },
+  });
+};
+
+// List provider's bookings (missing route in original)
+export const getProviderBookings = async (providerId: string, status?: string) => {
+  return prisma.booking.findMany({
+    where: {
+      providerId,
+      ...(status ? { status: status.toUpperCase() as any } : {}),
+    },
+    orderBy: { scheduledAt: 'asc' },
+    include: {
+      customer: { select: { fullName: true, phone: true } },
+      serviceRequest: { select: { category: true, description: true, address: true, preferredDate: true } },
     },
   });
 };
