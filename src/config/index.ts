@@ -1,64 +1,17 @@
-import dotenv from 'dotenv';
-dotenv.config();
-
-const required = (key: string): string => {
-  const val = process.env[key];
-  if (!val) throw new Error(`Missing required environment variable: ${key}`);
-  return val;
-};
-
-const optional = (key: string, fallback = ''): string =>
-  process.env[key] ?? fallback;
-
-export const config = {
-  port: parseInt(optional('PORT', '3001'), 10),
-  nodeEnv: optional('NODE_ENV', 'development'),
-  frontendUrl: optional('FRONTEND_URL', 'http://localhost:3000'),
-
-  jwt: {
-    accessSecret: optional('JWT_ACCESS_SECRET', 'dev_access_secret_change_in_production'),
-    refreshSecret: optional('JWT_REFRESH_SECRET', 'dev_refresh_secret_change_in_production'),
-    accessExpiry: optional('JWT_ACCESS_EXPIRY', '15m'),
-    refreshExpiry: optional('JWT_REFRESH_EXPIRY', '7d'),
-  },
-
-  cloudinary: {
-    cloudName: optional('CLOUDINARY_CLOUD_NAME'),
-    apiKey: optional('CLOUDINARY_API_KEY'),
-    apiSecret: optional('CLOUDINARY_API_SECRET'),
-  },
-
-  paystack: {
-    secretKey: optional('PAYSTACK_SECRET_KEY'),
-    publicKey: optional('PAYSTACK_PUBLIC_KEY'),
-  },
-
-  vtpass: {
-    apiKey: optional('VTPASS_API_KEY'),
-    secretKey: optional('VTPASS_SECRET_KEY'),
-    baseUrl: optional('VTPASS_BASE_URL', 'https://sandbox.vtpass.com/api'),
-  },
-
-  email: {
-    resendApiKey: optional('RESEND_API_KEY'),
-    from: optional('EMAIL_FROM', 'noreply@haven.ng'),
-    fromName: optional('EMAIL_FROM_NAME', 'Haven'),
-    smtpHost: optional('SMTP_HOST'),
-    smtpPort: parseInt(optional('SMTP_PORT', '587'), 10),
-    smtpUser: optional('SMTP_USER'),
-    smtpPass: optional('SMTP_PASS'),
-  },
-
-  whatsapp: {
-    botNumber: optional('HAVEN_BOT_WHATSAPP', '2349017335663'),
-    supportNumber: optional('HAVEN_SUPPORT_WHATSAPP', '2349017335663'),
-  },
-
-  points: {
-    redemptionThreshold: parseInt(optional('POINTS_REDEMPTION_THRESHOLD', '5000'), 10),
-    airtimeValue: parseInt(optional('POINTS_AIRTIME_VALUE', '1000'), 10),
-  },
-
-  isDev: optional('NODE_ENV', 'development') === 'development',
-  isProd: optional('NODE_ENV', 'development') === 'production',
-};
+/**
+ * NOTE: This file previously exported an INCOMPLETE config that was missing
+ * `whatsapp.internalApiKey`, `whatsapp.botBaseUrl`, and `bcryptRounds`.
+ *
+ * ROOT CAUSE: TypeScript resolves `import from './config'` to src/config.ts
+ * (file beats directory). So at compile time every import got the CORRECT
+ * src/config.ts. But tsc cannot output BOTH dist/config.js (from src/config.ts)
+ * AND dist/config/index.js (from src/config/index.ts) — the directory wins in
+ * the filesystem, so dist/config.js was silently dropped. At runtime,
+ * require('./config') in dist/app.js resolved to dist/config/index.js
+ * (this file, compiled) — the INCOMPLETE one.
+ *
+ * FIX: This file now re-exports everything from src/config.ts so that
+ * both the TypeScript compiler and the Node.js runtime get the same config.
+ * src/config.ts remains the single source of truth.
+ */
+export { config } from '../config';

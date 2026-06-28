@@ -11,7 +11,12 @@
     "db:migrate:prod": "prisma migrate deploy",
     "db:generate": "prisma generate",
     "db:studio": "prisma studio",
-    "db:seed": "ts-node src/prisma/seed.ts"
+    "db:seed": "ts-node src/prisma/seed.ts",
+    "migrate": "prisma migrate deploy",
+    "migrate:dev": "prisma migrate dev",
+    "start:prod": "prisma migrate deploy && node dist/server.js",
+    "prebuild": "rimraf dist",
+    "postbuild": "echo \"Build complete\""
   },
   "dependencies": {
     "@prisma/client": "^5.22.0",

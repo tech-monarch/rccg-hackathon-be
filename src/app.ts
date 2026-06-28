@@ -4,30 +4,32 @@ import helmet from 'helmet';
 import morgan from 'morgan';
 import { config } from './config';
 import { errorHandler, notFoundHandler } from './middleware/error.middleware';
-import { generalLimiter } from './middleware/rateLimiter.middleware';
+import { generalLimiter, internalLimiter } from './middleware/rateLimiter.middleware';
 import { internalAuth } from './middleware/internalAuth.middleware';
 
 // Route imports
-import authRoutes from './modules/auth/auth.routes';
-import providersRoutes from './modules/providers/providers.routes';
-import customersRoutes from './modules/customers/customers.routes';
+import authRoutes          from './modules/auth/auth.routes';
+import providersRoutes     from './modules/providers/providers.routes';
+import customersRoutes     from './modules/customers/customers.routes';
 import serviceRequestsRoutes from './modules/service-requests/service-requests.routes';
-import bookingsRoutes from './modules/bookings/bookings.routes';
-import reviewsRoutes from './modules/reviews/reviews.routes';
-import inquiriesRoutes from './modules/inquiries/inquiries.routes';
-import housingRoutes from './modules/housing/housing.routes';
-import pointsRoutes from './modules/points/points.routes';
-import adminRoutes from './modules/admin/admin.routes';
-import internalRoutes from './modules/internal/internal.routes';
+import bookingsRoutes      from './modules/bookings/bookings.routes';
+import reviewsRoutes       from './modules/reviews/reviews.routes';
+import inquiriesRoutes     from './modules/inquiries/inquiries.routes';
+import housingRoutes       from './modules/housing/housing.routes';
+import pointsRoutes        from './modules/points/points.routes';
+import adminRoutes         from './modules/admin/admin.routes';
+import internalRoutes      from './modules/internal/internal.routes';
 
 const app = express();
 
-// ─── Security middleware ──────────────────────────────────────────────────────
+// ─── Security ─────────────────────────────────────────────────────────────────
 app.use(helmet());
 app.use(
   cors({
-    origin: (origin, callback) => {
-      // Allowed origins from env + sensible defaults
+    origin: (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
+      // Server-to-server calls (bot → backend) have no Origin header → always allowed
+      if (!origin) { callback(null, true); return; }
+
       const allowedRaw = config.frontendUrl
         ? config.frontendUrl.split(',').map(s => s.trim())
         : [];
@@ -38,7 +40,7 @@ app.use(
         'https://haven-rccg.vercel.app',
         'https://rccg-hackathon.vercel.app',
       ];
-      if (!origin || allowed.includes(origin)) {
+      if (allowed.includes(origin)) {
         callback(null, true);
       } else {
         callback(new Error(`CORS blocked: ${origin}`));
@@ -51,8 +53,8 @@ app.use(
 );
 
 // ─── Body parsing ─────────────────────────────────────────────────────────────
-app.use((req, res, next) => {
-  if (req.originalUrl === '/api/v1/bookings/paystack/callback') {
+app.use((req: express.Request, res: express.Response, next: express.NextFunction) => {
+  if ((req as any).originalUrl === '/api/v1/bookings/paystack/callback') {
     next();
   } else {
     express.json({ limit: '10mb' })(req, res, next);
@@ -60,41 +62,42 @@ app.use((req, res, next) => {
 });
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-// ─── Logging ─────────────────────────────────────────────────────────────────
+// ─── Logging ──────────────────────────────────────────────────────────────────
 if (config.isDev) {
   app.use(morgan('dev'));
 } else {
   app.use(morgan('combined'));
 }
 
-// ─── Rate limiting ────────────────────────────────────────────────────────────
+// ─── General rate limiting ────────────────────────────────────────────────────
 app.use('/api/', generalLimiter);
 
 // ─── Health check ─────────────────────────────────────────────────────────────
-app.get('/health', (_req, res) => {
+app.get('/health', (_req: express.Request, res: express.Response) => {
   res.json({ status: 'ok', service: 'haven-api', timestamp: new Date().toISOString() });
 });
 
-// ─── API Routes ───────────────────────────────────────────────────────────────
+// ─── Public API routes ────────────────────────────────────────────────────────
 const API = '/api/v1';
 
-app.use(`${API}/auth`, authRoutes);
-app.use(`${API}/providers`, providersRoutes);
-app.use(`${API}/customers`, customersRoutes);
+app.use(`${API}/auth`,             authRoutes);
+app.use(`${API}/providers`,        providersRoutes);
+app.use(`${API}/customers`,        customersRoutes);
 app.use(`${API}/service-requests`, serviceRequestsRoutes);
-app.use(`${API}/bookings`, bookingsRoutes);
-app.use(`${API}/inquiries`, inquiriesRoutes);
-app.use(`${API}/housing`, housingRoutes);
-app.use(`${API}/points`, pointsRoutes);
-app.use(`${API}/admin`, adminRoutes);
+app.use(`${API}/bookings`,         bookingsRoutes);
+app.use(`${API}/inquiries`,        inquiriesRoutes);
+app.use(`${API}/housing`,          housingRoutes);
+app.use(`${API}/points`,           pointsRoutes);
+app.use(`${API}/admin`,            adminRoutes);
+app.use(`${API}`,                  reviewsRoutes);
 
-// Reviews nested under bookings path
-app.use(`${API}`, reviewsRoutes);
+// ─── Internal API (bot-only) ──────────────────────────────────────────────────
+// Protected by X-Internal-Key header (internalAuth) and a generous rate limiter.
+// The generalLimiter above also applies, but internalLimiter's limit is higher
+// to accommodate burst registration/login traffic from the bot.
+app.use(`${API}/internal`, internalAuth, internalLimiter, internalRoutes);
 
-// ─── Internal API (bot-only) ─────────────────────────────────────────────────
-app.use(`${API}/internal`, internalAuth, internalRoutes);
-
-// ─── 404 + Error handlers ─────────────────────────────────────────────────────
+// ─── Error handlers ───────────────────────────────────────────────────────────
 app.use(notFoundHandler);
 app.use(errorHandler);
 

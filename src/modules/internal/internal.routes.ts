@@ -1,12 +1,26 @@
 /**
  * Internal API — used exclusively by the WhatsApp bot.
- * Protected by INTERNAL_API_KEY (X-Internal-Key header).
+ * Protected by INTERNAL_API_KEY (X-Internal-Key header) via internalAuth middleware.
  * All routes return plain JSON shaped for easy bot consumption.
+ *
+ * ADDITIONS vs original:
+ *   POST /register-customer  — registers a new customer without going through the
+ *                              public auth route (which has a strict IP rate limit
+ *                              that breaks when many users register from the same
+ *                              bot server NAT IP).
+ *   POST /login              — logs in an existing user by email+password, returning
+ *                              tokens. Allows the bot to re-authenticate a user who
+ *                              has an email+password account without forcing them
+ *                              through the public auth limiter.
+ *
+ * Both endpoints call the same auth service functions as the public routes,
+ * so business logic is not duplicated.
  */
 import { Router, Request, Response, NextFunction } from 'express';
 import prisma from '../../config/database';
 import { sendSuccess, sendError } from '../../utils/response';
 import { calculatePoints } from '../../utils/helpers';
+import * as authService from '../auth/auth.service';
 
 const router = Router();
 
@@ -16,24 +30,18 @@ const wrap = (fn: (req: Request, res: Response) => Promise<void>) =>
     fn(req, res).catch(next);
 
 // ─── Resolve user by phone number ─────────────────────────────────────────────
-// Bot calls this first thing to identify who is messaging.
-// Strips leading + and 0-prefix to normalise Nigerian numbers.
 router.post('/resolve-user', wrap(async (req, res) => {
   let { phone } = req.body as { phone: string };
   if (!phone) { sendError(res, 'phone is required', 400); return; }
 
-  // Normalize: remove spaces/dashes, strip leading +
   phone = phone.replace(/[\s\-()]/g, '').replace(/^\+/, '');
-  // Nigerian number: leading 0 → 234
   const variants = new Set([phone]);
   if (phone.startsWith('234')) variants.add('0' + phone.slice(3));
   if (phone.startsWith('0'))   variants.add('234' + phone.slice(1));
-  // Also try without country code
-  if (phone.length > 10) variants.add(phone.slice(-10));
+  if (phone.length > 10)       variants.add(phone.slice(-10));
 
   const phoneArr = Array.from(variants);
 
-  // Search Customer first
   const customer = await prisma.customer.findFirst({
     where: { phone: { in: phoneArr } },
     select: {
@@ -45,18 +53,17 @@ router.post('/resolve-user', wrap(async (req, res) => {
   if (customer) {
     if (!customer.user.isActive) { sendError(res, 'Account suspended', 403); return; }
     sendSuccess(res, {
-      role: 'CUSTOMER',
-      userId: customer.user.id,
-      profileId: customer.id,
-      name: customer.fullName,
-      email: customer.user.email,
-      phone: customer.phone,
+      role:        'CUSTOMER',
+      userId:      customer.user.id,
+      profileId:   customer.id,
+      name:        customer.fullName,
+      email:       customer.user.email,
+      phone:       customer.phone,
       totalPoints: customer.totalPoints,
     });
     return;
   }
 
-  // Search Provider
   const provider = await prisma.provider.findFirst({
     where: { phone: { in: phoneArr } },
     select: {
@@ -69,15 +76,15 @@ router.post('/resolve-user', wrap(async (req, res) => {
   if (provider) {
     if (!provider.user.isActive) { sendError(res, 'Account suspended', 403); return; }
     sendSuccess(res, {
-      role: 'PROVIDER',
-      userId: provider.user.id,
-      profileId: provider.id,
-      name: provider.businessName,
-      ownerName: provider.ownerName,
-      email: provider.user.email,
-      phone: provider.phone,
-      category: provider.category,
-      location: provider.location,
+      role:         'PROVIDER',
+      userId:       provider.user.id,
+      profileId:    provider.id,
+      name:         provider.businessName,
+      ownerName:    provider.ownerName,
+      email:        provider.user.email,
+      phone:        provider.phone,
+      category:     provider.category,
+      location:     provider.location,
     });
     return;
   }
@@ -85,9 +92,55 @@ router.post('/resolve-user', wrap(async (req, res) => {
   sendError(res, 'User not found', 404);
 }));
 
+// ─── Register a new customer (bot flow, bypasses IP rate limiter) ──────────────
+// Identical outcome to POST /api/v1/auth/register/customer but:
+//   - Accessible only with X-Internal-Key (already authenticated at middleware level)
+//   - Not subject to the authLimiter (which would fire when many users register
+//     from the same bot server IP in a short window)
+//
+// Body: { fullName, email, phone, password }
+// Response: { user, customer, accessToken, refreshToken }
+router.post('/register-customer', wrap(async (req, res) => {
+  const { fullName, email, phone, password } = req.body;
+
+  if (!fullName || !email || !phone || !password) {
+    sendError(res, 'fullName, email, phone and password are required', 400);
+    return;
+  }
+  if (password.length < 6) {
+    sendError(res, 'Password must be at least 6 characters', 400);
+    return;
+  }
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    sendError(res, 'Invalid email address', 400);
+    return;
+  }
+
+  // Delegate to auth service — same validation, hashing and token generation
+  const result = await authService.registerCustomer({ fullName, email: email.toLowerCase(), phone, password });
+  sendSuccess(res, result, 201);
+}));
+
+// ─── Login by email + password (bot flow) ─────────────────────────────────────
+// The bot stores email during registration and can replay login for users who
+// already have an account. Bypasses the IP-based authLimiter.
+//
+// Body: { email, password }
+// Response: { user, profile, role, accessToken, refreshToken }
+router.post('/login', wrap(async (req, res) => {
+  const { email, password } = req.body;
+
+  if (!email || !password) {
+    sendError(res, 'email and password are required', 400);
+    return;
+  }
+
+  const result = await authService.login({ email: email.toLowerCase(), password });
+  sendSuccess(res, result);
+}));
+
 // ─── CUSTOMER routes ──────────────────────────────────────────────────────────
 
-// List customer's active service requests
 router.get('/customer/:id/requests', wrap(async (req, res) => {
   const requests = await prisma.serviceRequest.findMany({
     where: {
@@ -107,7 +160,6 @@ router.get('/customer/:id/requests', wrap(async (req, res) => {
   sendSuccess(res, requests);
 }));
 
-// List customer's bookings
 router.get('/customer/:id/bookings', wrap(async (req, res) => {
   const { status } = req.query as { status?: string };
   const bookings = await prisma.booking.findMany({
@@ -126,7 +178,6 @@ router.get('/customer/:id/bookings', wrap(async (req, res) => {
   sendSuccess(res, bookings);
 }));
 
-// Get customer profile + points
 router.get('/customer/:id/profile', wrap(async (req, res) => {
   const customer = await prisma.customer.findUnique({
     where: { id: req.params.id },
@@ -136,7 +187,6 @@ router.get('/customer/:id/profile', wrap(async (req, res) => {
   sendSuccess(res, customer);
 }));
 
-// Create service request
 router.post('/service-requests', wrap(async (req, res) => {
   const { customerId, category, description, address, preferredDate, preferredTime, urgency } = req.body;
   if (!customerId || !category || !description || !address || !preferredDate || !preferredTime) {
@@ -144,10 +194,7 @@ router.post('/service-requests', wrap(async (req, res) => {
   }
   const request = await prisma.serviceRequest.create({
     data: {
-      customerId,
-      category,
-      description,
-      address,
+      customerId, category, description, address,
       preferredDate: new Date(preferredDate),
       preferredTime,
       urgency: (urgency ?? 'STANDARD').toUpperCase() as any,
@@ -156,7 +203,6 @@ router.post('/service-requests', wrap(async (req, res) => {
   sendSuccess(res, request, 201);
 }));
 
-// Get quotes for a service request (returns matching providers)
 router.get('/service-requests/:id/quotes', wrap(async (req, res) => {
   const request = await prisma.serviceRequest.findUnique({ where: { id: req.params.id } });
   if (!request) { sendError(res, 'Not found', 404); return; }
@@ -175,22 +221,21 @@ router.get('/service-requests/:id/quotes', wrap(async (req, res) => {
     },
   });
 
-  const quotes = providers.map(p => ({
-    providerId: p.id,
-    businessName: p.businessName,
-    ownerName: p.ownerName,
-    phone: p.phone,
-    category: p.category,
-    location: p.location,
-    avgRating: p.avgRating,
-    totalReviews: p.totalReviews,
+  const quotes = providers.map((p: typeof providers[0]) => ({
+    providerId:     p.id,
+    businessName:   p.businessName,
+    ownerName:      p.ownerName,
+    phone:          p.phone,
+    category:       p.category,
+    location:       p.location,
+    avgRating:      p.avgRating,
+    totalReviews:   p.totalReviews,
     estimatedPrice: Math.round(5000 * urgencyMultiplier),
   }));
 
   sendSuccess(res, quotes);
 }));
 
-// Create booking
 router.post('/bookings', wrap(async (req, res) => {
   const { customerId, serviceRequestId, providerId, scheduledAt, amount = 5000 } = req.body;
   if (!customerId || !serviceRequestId || !providerId || !scheduledAt) {
@@ -221,7 +266,6 @@ router.post('/bookings', wrap(async (req, res) => {
   sendSuccess(res, booking, 201);
 }));
 
-// Get single booking
 router.get('/bookings/:id', wrap(async (req, res) => {
   const booking = await prisma.booking.findUnique({
     where: { id: req.params.id },
@@ -235,13 +279,11 @@ router.get('/bookings/:id', wrap(async (req, res) => {
   sendSuccess(res, booking);
 }));
 
-// Cancel booking
 router.post('/bookings/:id/cancel', wrap(async (req, res) => {
   const { requesterId, requesterRole } = req.body;
   const booking = await prisma.booking.findUnique({ where: { id: req.params.id } });
   if (!booking) { sendError(res, 'Not found', 404); return; }
 
-  // Validate authorization
   if (requesterRole === 'CUSTOMER' && booking.customerId !== requesterId) {
     sendError(res, 'Not authorized', 403); return;
   }
@@ -263,7 +305,6 @@ router.post('/bookings/:id/cancel', wrap(async (req, res) => {
 
 // ─── PROVIDER routes ──────────────────────────────────────────────────────────
 
-// List provider's jobs
 router.get('/provider/:id/jobs', wrap(async (req, res) => {
   const { status } = req.query as { status?: string };
   const bookings = await prisma.booking.findMany({
@@ -281,14 +322,13 @@ router.get('/provider/:id/jobs', wrap(async (req, res) => {
   sendSuccess(res, bookings);
 }));
 
-// Provider marks job complete
 router.post('/provider/:id/jobs/:bookingId/complete', wrap(async (req, res) => {
   const { id: providerId, bookingId } = req.params;
 
   const booking = await prisma.booking.findUnique({ where: { id: bookingId } });
-  if (!booking)                       { sendError(res, 'Not found', 404); return; }
+  if (!booking)                          { sendError(res, 'Not found', 404); return; }
   if (booking.providerId !== providerId) { sendError(res, 'Not authorized', 403); return; }
-  if (booking.status === 'COMPLETED') { sendError(res, 'Already completed', 400); return; }
+  if (booking.status === 'COMPLETED')    { sendError(res, 'Already completed', 400); return; }
   if (!['PAID', 'IN_PROGRESS'].includes(booking.status)) {
     sendError(res, 'Booking must be PAID or IN_PROGRESS to complete', 400); return;
   }
@@ -306,9 +346,9 @@ router.post('/provider/:id/jobs/:bookingId/complete', wrap(async (req, res) => {
     }),
     prisma.pointsTransaction.create({
       data: {
-        customerId: booking.customerId,
-        type: 'EARNED',
-        amount: pointsToAward,
+        customerId:  booking.customerId,
+        type:        'EARNED',
+        amount:      pointsToAward,
         bookingId,
         description: `Service completed – ${pointsToAward} points awarded`,
       },
@@ -322,7 +362,6 @@ router.post('/provider/:id/jobs/:bookingId/complete', wrap(async (req, res) => {
   sendSuccess(res, { message: 'Job marked complete', pointsAwarded: pointsToAward });
 }));
 
-// Mark job as in-progress
 router.post('/provider/:id/jobs/:bookingId/start', wrap(async (req, res) => {
   const { id: providerId, bookingId } = req.params;
   const booking = await prisma.booking.findUnique({ where: { id: bookingId } });
@@ -334,7 +373,6 @@ router.post('/provider/:id/jobs/:bookingId/start', wrap(async (req, res) => {
   sendSuccess(res, { message: 'Job marked as in progress' });
 }));
 
-// Provider profile
 router.get('/provider/:id/profile', wrap(async (req, res) => {
   const provider = await prisma.provider.findUnique({
     where: { id: req.params.id },
@@ -344,7 +382,6 @@ router.get('/provider/:id/profile', wrap(async (req, res) => {
   sendSuccess(res, provider);
 }));
 
-// Provider's inquiries
 router.get('/provider/:id/inquiries', wrap(async (req, res) => {
   const inquiries = await prisma.inquiry.findMany({
     where: { providerId: req.params.id, status: 'NEW' },
@@ -355,7 +392,6 @@ router.get('/provider/:id/inquiries', wrap(async (req, res) => {
   sendSuccess(res, inquiries);
 }));
 
-// Search providers (for customer)
 router.get('/providers', wrap(async (req, res) => {
   const { category, location, limit = '5' } = req.query as Record<string, string>;
   const providers = await prisma.provider.findMany({
